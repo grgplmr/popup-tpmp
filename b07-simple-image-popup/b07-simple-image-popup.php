@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: B07 Simple Image Popup
- * Description: Affiche une popup simple avec une image configurable depuis l'admin quelques secondes après l'ouverture du site.
- * Version: 1.1.0
+ * Description: Affiche une popup de notification pour le dernier article publié.
+ * Version: 2.0.0
  * Author: Popup TPMP
  * License: GPL-2.0-or-later
  */
@@ -11,9 +11,29 @@ if (!defined('ABSPATH')) {
     exit;
 }
 
-function b07_popup_get_default_image_url(): string
+function b07_popup_get_latest_post_data(): ?array
 {
-    return plugins_url('assets/popup-image.svg', __FILE__);
+    $latest_posts = get_posts([
+        'post_type'      => 'post',
+        'post_status'    => 'publish',
+        'numberposts'    => 1,
+        'no_found_rows'  => true,
+        'fields'         => 'objects',
+        'suppress_filters' => false,
+    ]);
+
+    if (empty($latest_posts)) {
+        return null;
+    }
+
+    $post = $latest_posts[0];
+
+    return [
+        'id'          => (int) $post->ID,
+        'title'       => get_the_title($post),
+        'permalink'   => get_permalink($post),
+        'publishedAt' => get_the_date(DATE_W3C, $post),
+    ];
 }
 
 function b07_popup_enqueue_assets(): void
@@ -22,7 +42,7 @@ function b07_popup_enqueue_assets(): void
         return;
     }
 
-    $version = '1.1.0';
+    $version = '2.0.0';
 
     wp_enqueue_style(
         'b07-popup-style',
@@ -39,18 +59,21 @@ function b07_popup_enqueue_assets(): void
         true
     );
 
-    $image_url = get_option('b07_popup_image_url', '') ?: b07_popup_get_default_image_url();
-    $delay_ms  = absint(get_option('b07_popup_delay_ms', 2000)) ?: 2000;
+    $latest_post = b07_popup_get_latest_post_data();
 
-    wp_localize_script(
-        'b07-popup-script',
-        'b07PopupSettings',
-        [
-            'imageUrl'        => esc_url_raw($image_url),
-            'delayMs'         => $delay_ms,
-            'enabledGlobally' => true,
-        ]
-    );
+    if ($latest_post) {
+        wp_localize_script(
+            'b07-popup-script',
+            'PopupNewPostData',
+            [
+                'postId'   => $latest_post['id'],
+                'title'    => wp_strip_all_tags($latest_post['title']),
+                'permalink'=> esc_url_raw($latest_post['permalink']),
+                'seenKey'  => 'popup_last_seen_post_id',
+                'delayMs'  => absint(get_option('b07_popup_delay_ms', 2000)) ?: 2000,
+            ]
+        );
+    }
 }
 add_action('wp_enqueue_scripts', 'b07_popup_enqueue_assets');
 
@@ -60,12 +83,22 @@ function b07_popup_render_markup(): void
         return;
     }
 
-    $image_url = get_option('b07_popup_image_url', '') ?: b07_popup_get_default_image_url();
+    $latest_post = b07_popup_get_latest_post_data();
+
+    if (!$latest_post) {
+        return;
+    }
     ?>
-    <div class="b07-popup-overlay" role="dialog" aria-modal="true" aria-label="Promotion">
-        <div class="b07-popup">
-            <button type="button" class="b07-popup-close" aria-label="Fermer la popup">×</button>
-            <img class="b07-popup-image" src="<?php echo esc_url($image_url); ?>" alt="Promotion du site" loading="lazy" />
+    <div class="b07-popup-overlay" aria-hidden="true">
+        <div class="b07-popup" role="dialog" aria-modal="true" aria-label="Notification nouvel article" tabindex="-1">
+            <button type="button" class="b07-popup-close" aria-label="Fermer la notification">×</button>
+            <div class="b07-popup-body">
+                <p class="b07-popup-kicker"><?php echo esc_html__('Un nouvel article vient de paraître', 'b07-popup'); ?></p>
+                <h3 class="b07-popup-title"><?php echo esc_html($latest_post['title']); ?></h3>
+                <a class="b07-popup-button" href="<?php echo esc_url($latest_post['permalink']); ?>">
+                    <?php echo esc_html__('Découvrir l\'article', 'b07-popup'); ?>
+                </a>
+            </div>
         </div>
     </div>
     <?php
@@ -74,12 +107,6 @@ add_action('wp_footer', 'b07_popup_render_markup');
 
 function b07_popup_register_settings(): void
 {
-    register_setting('b07_popup_options', 'b07_popup_image_url', [
-        'type'              => 'string',
-        'sanitize_callback' => 'esc_url_raw',
-        'default'           => '',
-    ]);
-
     register_setting('b07_popup_options', 'b07_popup_delay_ms', [
         'type'              => 'integer',
         'sanitize_callback' => 'absint',
@@ -94,14 +121,6 @@ function b07_popup_register_settings(): void
     );
 
     add_settings_field(
-        'b07_popup_image_url',
-        __('URL de l\'image', 'b07-popup'),
-        'b07_popup_render_image_field',
-        'b07_popup_options',
-        'b07_popup_settings_section'
-    );
-
-    add_settings_field(
         'b07_popup_delay_ms',
         __('Délai (ms)', 'b07-popup'),
         'b07_popup_render_delay_field',
@@ -110,26 +129,6 @@ function b07_popup_register_settings(): void
     );
 }
 add_action('admin_init', 'b07_popup_register_settings');
-
-function b07_popup_render_image_field(): void
-{
-    $image_url = esc_url(get_option('b07_popup_image_url', ''));
-    $placeholder = esc_attr__('Aucune image sélectionnée', 'b07-popup');
-    ?>
-    <div class="b07-popup-image-field">
-        <input type="url" id="b07_popup_image_url" name="b07_popup_image_url" class="regular-text" value="<?php echo $image_url; ?>" placeholder="<?php echo $placeholder; ?>" />
-        <button type="button" class="button b07-popup-image-select" data-target="#b07_popup_image_url"><?php esc_html_e('Choisir une image', 'b07-popup'); ?></button>
-        <button type="button" class="button b07-popup-image-remove"><?php esc_html_e('Retirer', 'b07-popup'); ?></button>
-        <div class="b07-popup-image-preview" style="margin-top: 10px; max-width: 320px;">
-            <?php if ($image_url) : ?>
-                <img src="<?php echo $image_url; ?>" alt="<?php esc_attr_e('Prévisualisation de l\'image', 'b07-popup'); ?>" style="max-width: 100%; height: auto;" />
-            <?php else : ?>
-                <em><?php esc_html_e('Aucune image sélectionnée.', 'b07-popup'); ?></em>
-            <?php endif; ?>
-        </div>
-    </div>
-    <?php
-}
 
 function b07_popup_render_delay_field(): void
 {
@@ -150,24 +149,6 @@ function b07_popup_register_settings_page(): void
     );
 }
 add_action('admin_menu', 'b07_popup_register_settings_page');
-
-function b07_popup_enqueue_admin_assets(string $hook_suffix): void
-{
-    if ($hook_suffix !== 'settings_page_b07-popup') {
-        return;
-    }
-
-    wp_enqueue_media();
-
-    wp_enqueue_script(
-        'b07-popup-admin',
-        plugins_url('assets/admin.js', __FILE__),
-        ['jquery'],
-        '1.1.0',
-        true
-    );
-}
-add_action('admin_enqueue_scripts', 'b07_popup_enqueue_admin_assets');
 
 function b07_popup_render_settings_page(): void
 {
